@@ -1,0 +1,44 @@
+# Device settings
+device:
+  name_prefixes:
+    - "RaceBox Mini "
+    - "RaceBox Mini S "
+    - "RaceBox Micro "
+  sampling_rate: 10   # Hz
+  packet_size: 80     # bytes
+  max_retry_attempts: 5
+  retry_delay: 5.0    # seconds
+
+# Bluetooth settings
+bluetooth:
+  # UART Service and Characteristics UUIDs
+  uart_service_uuid: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+  rx_char_uuid: "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+  tx_char_uuid: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+  
+  # Connection parameters
+  desired_mtu: 512
+  scan_interval: 1.0
+  connection_timeout: 20.0  # Increased timeout
+  scan_timeout: 5.0       # Added scan timeout
+  device_timeout: 5.0     # Added device timeout
+
+# Data parsing settings
+parser:
+  packet_start: [0xB5, 0x62]  # UBX protocol start sequence
+  scaling_factors:
+    acceleration: 1000.0  # Convert to g
+    rotation: 100.0      # Convert to deg/s
+    coordinates: 10000000.0  # Convert to degrees
+    speed: 1000.0       # Convert to km/h (after * 3.6)
+
+# Display settings
+display:
+  clear_screen: true
+  show_controls: true
+  refresh_rate: 10  # Hz
+
+# Debug settings
+debug:
+  enabled: false
+  log_raw_data: false
