@@ -5,6 +5,40 @@ import time
 import yaml
 from pathlib import Path
 
+class PacketAssembler:
+    PACKET_START = bytes([0xB5, 0x62])  # Start sequence for UBX packets
+    
+    def __init__(self):
+        self.buffer = bytearray()
+        self.packet_size = 80  # RaceBox data packet size
+    
+    def add_data(self, data: bytes) -> list[bytes]:
+        """
+        Add received data to buffer and try to extract complete packets.
+        Returns a list of complete packets.
+        """
+        self.buffer.extend(data)
+        packets = []
+        
+        while len(self.buffer) >= 2:
+            # Look for packet start sequence
+            if self.buffer[0:2] != self.PACKET_START:
+                # Remove byte until we find start sequence or buffer is too small
+                self.buffer = self.buffer[1:]
+                continue
+                
+            # Check if we have a complete packet
+            if len(self.buffer) >= self.packet_size:
+                # Extract packet
+                packet = self.buffer[:self.packet_size]
+                packets.append(bytes(packet))
+                self.buffer = self.buffer[self.packet_size:]
+            else:
+                # Not enough data for complete packet
+                break
+                
+        return packets
+
 class RaceboxScanner:
     def __init__(self):
         # Load configuration
@@ -14,7 +48,7 @@ class RaceboxScanner:
         
         # Initialize variables
         self.client = None
-        self.data_buffer = bytearray()
+        self.packet_assembler = PacketAssembler()
         self.device_info = None
         self.display_data = False
         self.sampling_frequency = self.config['device']['sampling_rate']
@@ -38,16 +72,40 @@ class RaceboxScanner:
             await asyncio.sleep(1)
 
     def handle_data(self, sender, data):
+        """Handle incoming BLE notifications and reassemble packets."""
         current_time = time.time()
         interval = 1.0 / self.sampling_frequency
         
-        if current_time - self.last_update >= interval:
-            self.data_buffer.extend(data)
-            if len(self.data_buffer) >= 80:  # Complete RaceBox packet
-                if self.display_data:  # Only display if 'q' was pressed
-                    self.parse_and_print_data(self.data_buffer[:80])
-                self.data_buffer = self.data_buffer[80:]
+        # Process incoming data through packet assembler
+        complete_packets = self.packet_assembler.add_data(data)
+        
+        # Process each complete packet
+        for packet in complete_packets:
+            if current_time - self.last_update >= interval:
+                if self.display_data:
+                    self.parse_and_print_data(packet)
                 self.last_update = current_time
+
+    async def configure_ble_connection(self, client):
+        """Configure BLE connection parameters for optimal performance."""
+        try:
+            # Get maximum supported MTU
+            mtu = await client.get_mtu()
+            print(f"Current MTU: {mtu}")
+            
+            # Try to negotiate a higher MTU if possible
+            try:
+                desired_mtu = self.config['bluetooth']['desired_mtu']
+                await client.request_mtu(desired_mtu)
+                new_mtu = await client.get_mtu()
+                print(f"Negotiated MTU: {new_mtu}")
+            except NotImplementedError:
+                print("MTU negotiation not supported on this platform")
+            except Exception as e:
+                print(f"MTU negotiation failed: {e}")
+                
+        except Exception as e:
+            print(f"Error configuring BLE parameters: {e}")
 
     def parse_and_print_data(self, data):
         try:
@@ -112,58 +170,47 @@ class RaceboxScanner:
             await asyncio.sleep(0.1)
 
     async def run(self):
-        while True:  # Keep trying to connect
+        retry_count = 0
+        while retry_count < self.config['device']['max_retry_attempts']:
             try:
-                # Find and connect to device
                 device_address = await self.find_racebox()
                 if not device_address:
                     return
 
                 print("\nConnecting to device...")
-                for attempt in range(self.config['device']['max_connection_attempts']):
-                    try:
-                        async with BleakClient(device_address, timeout=self.config['device']['connection_timeout']) as client:
-                            print("Connected successfully!")
-                            print(f"Sampling Rate: {self.sampling_frequency} Hz")
-                            print("\nPress 'q' to start/stop data display")
-                            
-                            # Start notification handler
-                            await client.start_notify(
-                                self.config['bluetooth']['tx_char_uuid'], 
-                                self.handle_data
-                            )
-                            
-                            # Start keyboard monitor
-                            keyboard_task = asyncio.create_task(self.keyboard_monitor())
-                            
-                            while True:
-                                await asyncio.sleep(0.1)
-
-                    except Exception as e:
-                        print(f"Connection attempt {attempt + 1} failed: {str(e)}")
-                        if attempt + 1 < self.config['device']['max_connection_attempts']:
-                            print(f"Retrying in {self.config['device']['retry_delay']} seconds...")
-                            await asyncio.sleep(self.config['device']['retry_delay'])
-                        else:
-                            print("Maximum connection attempts reached.")
-                            print("Tips:")
-                            print("1. Make sure the device is powered on and in range")
-                            print("2. Try restarting the device")
-                            print("3. On Windows, try turning Bluetooth off and on again")
-                            print("4. Check if device is connected to another application")
-                            print("\nPress Ctrl+C to exit or wait to retry scanning...")
-                            await asyncio.sleep(5)
-                            break  # Break the retry loop and go back to scanning
+                async with BleakClient(device_address) as client:
+                    # Configure BLE parameters
+                    await self.configure_ble_connection(client)
+                    
+                    print("Connected successfully!")
+                    print(f"Sampling Rate: {self.sampling_frequency} Hz")
+                    print("\nPress 'q' to start/stop data display")
+                    
+                    # Start notification handler
+                    await client.start_notify(
+                        self.config['bluetooth']['tx_char_uuid'], 
+                        self.handle_data
+                    )
+                    
+                    # Start keyboard monitor
+                    keyboard_task = asyncio.create_task(self.keyboard_monitor())
+                    
+                    while True:
+                        await asyncio.sleep(0.1)
 
             except asyncio.CancelledError:
                 print("\nStopping...")
                 break
             except Exception as e:
-                print(f"Error: {str(e)}")
-                print("Restarting scan in 5 seconds...")
-                await asyncio.sleep(5)
-
-        print("Scanner stopped.")
+                print(f"Connection error: {e}")
+                retry_count += 1
+                if retry_count < self.config['device']['max_retry_attempts']:
+                    retry_delay = self.config['device']['retry_delay']
+                    print(f"Retrying in {retry_delay} seconds... (Attempt {retry_count + 1}/{self.config['device']['max_retry_attempts']})")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    print("Max retry attempts reached. Exiting...")
+                    break
 
 async def main():
     scanner = RaceboxScanner()
