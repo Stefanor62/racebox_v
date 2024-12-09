@@ -171,46 +171,71 @@ class RaceboxScanner:
 
     async def run(self):
         retry_count = 0
-        while retry_count < self.config['device']['max_retry_attempts']:
-            try:
-                device_address = await self.find_racebox()
-                if not device_address:
-                    return
+        keyboard_task = None  # Initialize keyboard task reference
+        
+        try:
+            while retry_count < self.config['device']['max_retry_attempts']:
+                try:
+                    device_address = await self.find_racebox()
+                    if not device_address:
+                        return
 
-                print("\nConnecting to device...")
-                async with BleakClient(device_address) as client:
-                    # Configure BLE parameters
-                    await self.configure_ble_connection(client)
-                    
-                    print("Connected successfully!")
-                    print(f"Sampling Rate: {self.sampling_frequency} Hz")
-                    print("\nPress 'q' to start/stop data display")
-                    
-                    # Start notification handler
-                    await client.start_notify(
-                        self.config['bluetooth']['tx_char_uuid'], 
-                        self.handle_data
-                    )
-                    
-                    # Start keyboard monitor
-                    keyboard_task = asyncio.create_task(self.keyboard_monitor())
-                    
-                    while True:
-                        await asyncio.sleep(0.1)
+                    print("\nConnecting to device...")
+                    async with BleakClient(device_address) as client:
+                        # Configure BLE parameters
+                        await self.configure_ble_connection(client)
+                        
+                        print("Connected successfully!")
+                        print(f"Sampling Rate: {self.sampling_frequency} Hz")
+                        print("\nPress 'q' to start/stop data display")
+                        
+                        # Start notification handler
+                        await client.start_notify(
+                            self.config['bluetooth']['tx_char_uuid'], 
+                            self.handle_data
+                        )
+                        
+                        # Start keyboard monitor
+                        keyboard_task = asyncio.create_task(self.keyboard_monitor())
+                        
+                        try:
+                            while True:
+                                await asyncio.sleep(0.1)
+                        except asyncio.CancelledError:
+                            raise
+                        finally:
+                            # Clean up notification handler
+                            await client.stop_notify(self.config['bluetooth']['tx_char_uuid'])
+                            
+                            # Cancel keyboard monitoring task if it exists
+                            if keyboard_task and not keyboard_task.done():
+                                keyboard_task.cancel()
+                                try:
+                                    await keyboard_task
+                                except asyncio.CancelledError:
+                                    pass
 
-            except asyncio.CancelledError:
-                print("\nStopping...")
-                break
-            except Exception as e:
-                print(f"Connection error: {e}")
-                retry_count += 1
-                if retry_count < self.config['device']['max_retry_attempts']:
-                    retry_delay = self.config['device']['retry_delay']
-                    print(f"Retrying in {retry_delay} seconds... (Attempt {retry_count + 1}/{self.config['device']['max_retry_attempts']})")
-                    await asyncio.sleep(retry_delay)
-                else:
-                    print("Max retry attempts reached. Exiting...")
+                except asyncio.CancelledError:
+                    print("\nStopping gracefully...")
                     break
+                except Exception as e:
+                    print(f"Connection error: {e}")
+                    retry_count += 1
+                    if retry_count < self.config['device']['max_retry_attempts']:
+                        retry_delay = self.config['device']['retry_delay']
+                        print(f"Retrying in {retry_delay} seconds... (Attempt {retry_count + 1}/{self.config['device']['max_retry_attempts']})")
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        print("Max retry attempts reached. Exiting...")
+                        break
+        finally:
+            # Final cleanup
+            if keyboard_task and not keyboard_task.done():
+                keyboard_task.cancel()
+                try:
+                    await keyboard_task
+                except asyncio.CancelledError:
+                    pass
 
 async def main():
     scanner = RaceboxScanner()
@@ -218,6 +243,14 @@ async def main():
         await scanner.run()
     except KeyboardInterrupt:
         print("\nStopping scanner...")
+    except Exception as e:
+        print(f"\nError: {e}")
+    finally:
+        # Ensure we cleanup the keyboard library
+        keyboard.unhook_all()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nScript terminated by user.")
